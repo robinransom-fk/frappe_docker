@@ -8,5 +8,15 @@
     "frappe/helpdesk@main": "9349de351943e3c13fce5e5d4fd5b6ea847373d4",
     "frappe/crm@main": "c35a481152d14dd3b1b76cd78941edbb722d8014",
     "frappe/frappe_docker:main/images/custom/Containerfile": "ff02845bf854c609779612a55d7bbf3ec75920da"
+  },
+  "169eaa0f97773b35a87342d886ad8be81f89360797d2727ed434154f5e2dde93": {
+    "frappe/frappe@version-15": "c073721f116fad219a2dd302d4a9ba2ae6e64673",
+    "frappe/erpnext@version-15": "6e699178ae60639e54504fd38c99a75d7543c3b7",
+    "frappe/hrms@version-15": "1024fcb88901cb7579e2cb12a8ad6483cb8cf022",
+    "shridarpatil/frappe_whatsapp@master": "f2664f9d68481bb0cb9700bce26e8ce371e18418",
+    "frappe/lms@main": "b2b92aea31a1ed284ac4430a9b55ce4585219287",
+    "frappe/helpdesk@main": "9349de351943e3c13fce5e5d4fd5b6ea847373d4",
+    "frappe/crm@main": "c35a481152d14dd3b1b76cd78941edbb722d8014",
+    "frappe/frappe_docker:main/images/custom/Containerfile": "ff02845bf854c609779612a55d7bbf3ec75920da"
   }
 }
