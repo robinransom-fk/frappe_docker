@@ -1,0 +1,372 @@
+name: Build HRMS Image
+
+on:
+  schedule:
+    - cron: '45 20 * * *'      # 02:15 IST daily
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 'Version tag to build (e.g. v15.5.0)'
+        required: false
+        default: 'v15.5.0'
+      force_rebuild:
+        description: 'Force rebuild even if no changes'
+        required: false
+        default: 'false'
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+# ──────────────────────────────────────────────────────────────
+env:
+  IMAGE_NAME:        robinfk/hrms
+  VERSION_TAG:       ${{ github.event.inputs.version_tag || 'v15.5.0' }}
+  CACHE_IMAGE:       ghcr.io/${{ github.repository_owner }}/erpnext-cache:buildcache
+
+  # Upstream versions
+  FRAPPE_BRANCH:     version-15
+  PYTHON_VERSION:    3.10.12
+  NODE_VERSION:      18.12.0
+
+  # Frappe-Docker repo location
+  FD_OWNER:          frappe
+  FD_REPO:           frappe_docker
+  FD_PATH:           images/custom/Containerfile
+  FD_BRANCH:         main
+
+# ──────────────────────────────────────────────────────────────
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      # ── 1. Checkout repo ─────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Check upstream SHAs and compare with Docker image ─
+      - name: Check for upstream changes and image currency
+        id: check
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT || github.token }}
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            
+            // Read apps configuration
+            const apps = JSON.parse(fs.readFileSync('apps.json', 'utf8'));
+            
+            // Force rebuild if requested via input
+            const forceRebuild = '${{ github.event.inputs.force_rebuild }}' === 'true';
+            if (forceRebuild) {
+              console.log("Force rebuild requested, will skip image check");
+            }
+            
+            console.log(`Checking if Docker image ${process.env.IMAGE_NAME}:${process.env.VERSION_TAG} exists and is up-to-date...`);
+            
+            // Get SHA data from latest image if it exists
+            let imageExists = false;
+            let imageSHAs = {};
+            
+            if (!forceRebuild) {
+              try {
+                // Try to authenticate with Docker Hub
+                execSync(`echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USER }}" --password-stdin`, { stdio: 'inherit' });
+                
+                // Try to pull the latest image
+                try {
+                  execSync(`docker pull ${process.env.IMAGE_NAME}:${process.env.VERSION_TAG}`, { stdio: 'inherit' });
+                  imageExists = true;
+                  
+                  // Extract labels from the image
+                  const inspectOutput = execSync(`docker inspect ${process.env.IMAGE_NAME}:${process.env.VERSION_TAG}`).toString();
+                  const imageInfo = JSON.parse(inspectOutput)[0];
+                  
+                  // Check if our custom SHA label exists
+                  if (imageInfo.Config && 
+                      imageInfo.Config.Labels && 
+                      imageInfo.Config.Labels['org.opencontainers.image.revision']) {
+                    try {
+                      const revisionData = imageInfo.Config.Labels['org.opencontainers.image.revision'];
+                      // If it's JSON, parse it
+                      if (revisionData.startsWith('{')) {
+                        imageSHAs = JSON.parse(revisionData);
+                        console.log("Found SHA data in image labels");
+                      } else {
+                        // If it's a digest hash, try to load SHA details from repo
+                        console.log(`Found revision digest: ${revisionData}`);
+                        try {
+                          // Try to load SHA details from the repo
+                          const shaFile = '.image-shas.json';
+                          const { data: content } = await github.rest.repos.getContent({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            path: shaFile,
+                            ref: 'main'
+                          });
+                          const shaData = JSON.parse(Buffer.from(content.content, 'base64').toString());
+                          if (shaData[revisionData]) {
+                            imageSHAs = shaData[revisionData];
+                            console.log("Found detailed SHA data from repository");
+                          }
+                        } catch (e) {
+                          console.log("Could not find detailed SHA data in repo:", e.message);
+                        }
+                      }
+                    } catch (e) {
+                      console.log("Could not parse image revision data:", e.message);
+                    }
+                  } else {
+                    console.log("No revision data found in image labels");
+                  }
+                } catch (e) {
+                  console.log("Image doesn't exist in Docker Hub or couldn't be pulled:", e.message);
+                }
+              } catch (e) {
+                console.error("Error authenticating with Docker Hub:", e.message);
+              }
+            }
+            
+            // Get current SHAs from upstream repos
+            console.log("Checking upstream repositories for latest commits...");
+            const currentSHAs = {};
+            let needsRebuild = forceRebuild || !imageExists; // Default to true if forced or image doesn't exist
+            
+            // Check each app repository
+            for (const app of apps) {
+              try {
+                const urlParts = app.url.split('/');
+                if (urlParts.length < 5) {
+                  console.log(`Warning: Invalid URL format for ${app.url}`);
+                  continue;
+                }
+                
+                const owner = urlParts[3];
+                const repo = urlParts[4];
+                const branch = app.branch;
+                
+                console.log(`Checking ${owner}/${repo}@${branch}`);
+                const { data: ref } = await github.rest.repos.getBranch({ owner, repo, branch });
+                const sha = ref.commit.sha;
+                const key = `${owner}/${repo}@${branch}`;
+                currentSHAs[key] = sha;
+                
+                // Check if this app has changed since last build
+                if (!forceRebuild && imageSHAs[key] !== sha) {
+                  needsRebuild = true;
+                  console.log(`Change detected: ${key} (${imageSHAs[key]?.slice(0, 7) || 'new'} → ${sha.slice(0, 7)})`);
+                }
+              } catch (error) {
+                console.error(`Error checking ${app.url}: ${error.message}`);
+                // Continue with other apps, but consider rebuild needed
+                needsRebuild = true;
+              }
+            }
+            
+            // Check Frappe-Docker Containerfile
+            try {
+              const { FD_OWNER, FD_REPO, FD_PATH, FD_BRANCH } = process.env;
+              console.log(`Checking Containerfile at ${FD_OWNER}/${FD_REPO}:${FD_BRANCH}/${FD_PATH}`);
+              
+              const { data: fdMeta } = await github.rest.repos.getContent({
+                owner: FD_OWNER, 
+                repo: FD_REPO, 
+                path: FD_PATH, 
+                ref: FD_BRANCH
+              });
+              
+              const fdSha = fdMeta.sha;
+              const fdKey = `${FD_OWNER}/${FD_REPO}:${FD_BRANCH}/${FD_PATH}`;
+              currentSHAs[fdKey] = fdSha;
+              
+              // Check if Containerfile changed
+              if (!forceRebuild && imageSHAs[fdKey] !== fdSha) {
+                needsRebuild = true;
+                console.log(`Containerfile changed: ${imageSHAs[fdKey]?.slice(0, 7) || 'new'} → ${fdSha.slice(0, 7)}`);
+              }
+              
+              // Save latest Containerfile content
+              const containerfileContent = Buffer.from(fdMeta.content, 'base64').toString('utf8');
+              fs.mkdirSync('images/custom', { recursive: true });
+              fs.writeFileSync(FD_PATH, containerfileContent);
+            } catch (error) {
+              console.error(`Error fetching Containerfile: ${error.message}`);
+              // Don't stop the workflow, but mark as rebuild needed to be safe
+              needsRebuild = true;
+            }
+            
+            // Generate a digest of the SHA data for simpler storage
+            const crypto = require('crypto');
+            const shaDigest = crypto
+              .createHash('sha256')
+              .update(JSON.stringify(currentSHAs))
+              .digest('hex');
+            
+            // Save SHA data for future reference
+            fs.writeFileSync('.current-shas.json', JSON.stringify(currentSHAs, null, 2));
+            
+            // Set outputs
+            console.log(`Image ${needsRebuild ? 'needs' : 'does not need'} to be rebuilt`);
+            core.setOutput('needs_rebuild', String(needsRebuild));
+            core.setOutput('current_shas', JSON.stringify(currentSHAs));
+            core.setOutput('sha_digest', shaDigest);
+            
+            // Try to store SHA details in the repo for future reference
+            if (needsRebuild) {
+              try {
+                // Check if the SHA file already exists
+                let existingSHAs = {};
+                let shaFileExists = false;
+                try {
+                  const { data: content } = await github.rest.repos.getContent({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    path: '.image-shas.json',
+                    ref: 'main'
+                  });
+                  existingSHAs = JSON.parse(Buffer.from(content.content, 'base64').toString());
+                  shaFileExists = true;
+                } catch (e) {
+                  console.log("SHA file doesn't exist yet, will create it");
+                }
+                
+                // Add or update the current SHA digest
+                existingSHAs[shaDigest] = currentSHAs;
+                
+                // Try to commit the updated file
+                try {
+                  const content = Buffer.from(JSON.stringify(existingSHAs, null, 2)).toString('base64');
+                  await github.rest.repos.createOrUpdateFileContents({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    path: '.image-shas.json',
+                    message: `Update SHA details for ${process.env.IMAGE_NAME}:${process.env.VERSION_TAG}`,
+                    content: content,
+                    branch: 'main',
+                    ...(shaFileExists ? { sha: (await github.rest.repos.getContent({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      path: '.image-shas.json',
+                      ref: 'main'
+                    })).data.sha } : {})
+                  });
+                  console.log("Successfully updated SHA details in repository");
+                } catch (e) {
+                  console.log("Could not update SHA file:", e.message);
+                }
+              } catch (e) {
+                console.error("Error storing SHA details:", e.message);
+              }
+            }
+
+      # ── 3. Skip early if nothing changed ───────────────────────
+      - name: Skip build
+        if: steps.check.outputs.needs_rebuild == 'false'
+        run: |
+          echo "✅ Image $IMAGE_NAME:$VERSION_TAG is already up-to-date. Skipping build."
+          exit 0
+
+      # ── 4. Sync resources from frappe_docker ─────────────────────
+      - name: Sync resources folder
+        if: steps.check.outputs.needs_rebuild == 'true'
+        run: |
+          set -euo pipefail
+          
+          # Clone frappe_docker to get resources
+          git clone --depth 1 --branch ${FD_BRANCH} \
+            https://github.com/${FD_OWNER}/${FD_REPO}.git /tmp/frappe_docker
+          
+          # Copy resources folder (needed by Containerfile)
+          cp -R /tmp/frappe_docker/resources .
+          
+          # Ensure entry-point script is executable
+          chmod +x resources/nginx-entrypoint.sh
+
+      # ── 5. Base64-encode apps.json ─────────────────────────────
+      - name: Prepare apps.json
+        if: steps.check.outputs.needs_rebuild == 'true'
+        run: echo "APPS_JSON_B64=$(base64 -w0 apps.json)" >> $GITHUB_ENV
+
+      # ── 6. Setup for Docker build ─────────────────────────────
+      - name: Set up QEMU
+        if: steps.check.outputs.needs_rebuild == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        if: steps.check.outputs.needs_rebuild == 'true'
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+
+      - name: Docker Hub login
+        if: steps.check.outputs.needs_rebuild == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR (cache)
+        if: steps.check.outputs.needs_rebuild == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 7. Create docker-bake.hcl ──────────────────────────────
+      - name: Create docker-bake.hcl
+        if: steps.check.outputs.needs_rebuild == 'true'
+        run: |
+          # Store SHA data as an image label - escape quotes properly for HCL
+          CURRENT_SHAS='${{ steps.check.outputs.current_shas }}'
+          SHA_DIGEST="${{ steps.check.outputs.sha_digest }}"
+          ESCAPED_SHAS=$(echo "$CURRENT_SHAS" | sed 's/"/\\"/g')
+          
+          cat > docker-bake.hcl <<EOF
+          target "custom" {
+            dockerfile = "images/custom/Containerfile"
+            platforms  = ["linux/amd64", "linux/arm64"]
+            
+            args = {
+              FRAPPE_PATH     = "https://github.com/frappe/frappe"
+              FRAPPE_BRANCH   = "${FRAPPE_BRANCH}"
+              PYTHON_VERSION  = "${PYTHON_VERSION}"
+              NODE_VERSION    = "${NODE_VERSION}"
+              APPS_JSON_BASE64 = "${APPS_JSON_B64}"
+            }
+            
+            tags = [
+              "${IMAGE_NAME}:${VERSION_TAG}",
+              "${IMAGE_NAME}:latest"
+            ]
+            
+            labels = {
+              "org.opencontainers.image.created" = "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+              "org.opencontainers.image.revision" = "${SHA_DIGEST}"
+              "org.opencontainers.image.source" = "https://github.com/${GITHUB_REPOSITORY}"
+            }
+            
+            cache-from = ["type=registry,ref=${CACHE_IMAGE}"]
+            cache-to   = ["type=registry,ref=${CACHE_IMAGE},mode=max"]
+          }
+          EOF
+
+      # ── 8. Build & push multi-arch image ──────────────────────
+      - name: Build & push
+        if: steps.check.outputs.needs_rebuild == 'true'
+        uses: docker/bake-action@v4
+        with:
+          targets: custom
+          files: docker-bake.hcl
+          push: true
+
+      # ── 9. Summary ───────────────────────────────────────────
+      - name: Workflow summary
+        if: steps.check.outputs.needs_rebuild == 'true'
+        run: |
+          echo "🟢 ${IMAGE_NAME}:${VERSION_TAG} built & published."
