@@ -19,21 +19,25 @@ env:
   REGISTRY_USER: robinfk
   FRAPPE_VERSION: version-${{ github.event.inputs.version || '15' }}
   ERPNEXT_VERSION: version-${{ github.event.inputs.version || '15' }}
+  HRMS_VERSION: version-${{ github.event.inputs.version || '15' }}
   PYTHON_VERSION: 3.10.12
   NODE_VERSION: 18.12.0
 
 jobs:
   build:
-    name: Build HRMS
+    name: Build
     runs-on: ubuntu-latest
     services:
       registry:
         image: docker.io/registry:2
         ports:
           - 5000:5000
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
     
     steps:
-      - name: Checkout frappe_docker
+      - name: Checkout
         uses: actions/checkout@v4
       
       - name: Setup QEMU
@@ -46,10 +50,11 @@ jobs:
         uses: docker/setup-buildx-action@v3
         with:
           driver-opts: network=host
+          platforms: linux/${{ matrix.arch }}
       
-      - name: Prepare custom apps.json
+      - name: Prepare apps.json and patch Containerfile
         run: |
-          # Create or update apps.json for HRMS
+          # Create HRMS apps.json
           cat > apps.json <<EOF
           [
             {
@@ -62,7 +67,7 @@ jobs:
             },
             {
               "url": "https://github.com/frappe/hrms",
-              "branch": "${{ env.ERPNEXT_VERSION }}"
+              "branch": "${{ env.HRMS_VERSION }}"
             },
             {
               "url": "https://github.com/shridarpatil/frappe_whatsapp",
@@ -87,60 +92,69 @@ jobs:
           APPS_JSON_B64=$(base64 -w0 apps.json)
           echo "APPS_JSON_B64=$APPS_JSON_B64" >> $GITHUB_ENV
           
-          # Modify Containerfile to avoid interactive prompts
+          # Patch Containerfile to avoid interactive prompts
           if [ -f "images/custom/Containerfile" ]; then
+            # Add --yes flag to bench init
             sed -i 's/bench init \${APP_INSTALL_ARGS}/bench init --yes \${APP_INSTALL_ARGS}/g' images/custom/Containerfile
             echo "Modified Containerfile to avoid interactive prompts"
           else
-            echo "Warning: images/custom/Containerfile not found"
+            echo "Error: images/custom/Containerfile not found"
             find . -name "Containerfile" | sort
+            exit 1
           fi
       
-      - name: Create custom HRMS bake target
-        run: |
-          # Create a simple bake file for HRMS
-          cat > hrms-bake.hcl <<EOF
-          target "hrms" {
-            context = "."
-            dockerfile = "images/custom/Containerfile"
-            platforms = ["linux/amd64", "linux/arm64"]
-            
-            args = {
-              FRAPPE_PATH = "https://github.com/frappe/frappe"
-              FRAPPE_BRANCH = "${{ env.FRAPPE_VERSION }}"
-              PYTHON_VERSION = "${{ env.PYTHON_VERSION }}"
-              NODE_VERSION = "${{ env.NODE_VERSION }}"
-              APPS_JSON_BASE64 = "${{ env.APPS_JSON_B64 }}"
-            }
-            
-            tags = [
-              "${{ env.REGISTRY_USER }}/hrms:v${{ github.event.inputs.version || '15' }}",
-              "${{ env.REGISTRY_USER }}/hrms:latest"
-            ]
-          }
-          EOF
-      
-      - name: Build locally first
-        uses: docker/bake-action@v6.6.0
+      - name: Build to local registry
+        uses: docker/build-push-action@v5
         with:
-          files: hrms-bake.hcl
-          load: true
-          set: |
-            *.platform=linux/amd64
+          context: .
+          file: images/custom/Containerfile
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: |
+            localhost:5000/${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }}
+          build-args: |
+            FRAPPE_PATH=https://github.com/frappe/frappe
+            FRAPPE_BRANCH=${{ env.FRAPPE_VERSION }}
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            APPS_JSON_BASE64=${{ env.APPS_JSON_B64 }}
       
+      - name: Test image
+        if: matrix.arch == 'amd64'
+        run: |
+          # Pull the image from the local registry
+          docker pull localhost:5000/${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }}
+          
+          # Run a simple test
+          docker run --rm localhost:5000/${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }} bash -c "echo 'Testing image' && ls -la /home/frappe/frappe-bench/apps"
+
+  push:
+    name: Push
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ !failure() && !cancelled() }}
+    
+    steps:
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       
-      - name: Push to Docker Hub
-        uses: docker/bake-action@v6.6.0
-        with:
-          files: hrms-bake.hcl
-          push: true
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Create and push multi-arch manifest
+        run: |
+          # Create manifest for version tag
+          docker buildx imagetools create -t ${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }} \
+            localhost:5000/${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }}
+          
+          # Create manifest for latest tag
+          docker buildx imagetools create -t ${REGISTRY_USER}/hrms:latest \
+            localhost:5000/${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }}
       
       - name: Workflow summary
         run: |
-          echo "🟢 Successfully built and pushed ${{ env.REGISTRY_USER }}/hrms:v${{ github.event.inputs.version || '15' }}"
-          echo "🟢 Also tagged as ${{ env.REGISTRY_USER }}/hrms:latest"
+          echo "🟢 Successfully built and pushed ${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }} (multi-arch)"
+          echo "🟢 Also tagged as ${REGISTRY_USER}/hrms:latest"
