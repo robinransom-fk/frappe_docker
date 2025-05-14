@@ -111,7 +111,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           push: true
           tags: |
-            localhost:5000/${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }}
+            localhost:5000/robinfk/hrms:v${{ github.event.inputs.version || '15' }}
           build-args: |
             FRAPPE_PATH=https://github.com/frappe/frappe
             FRAPPE_BRANCH=${{ env.FRAPPE_VERSION }}
@@ -123,10 +123,10 @@ jobs:
         if: matrix.arch == 'amd64'
         run: |
           # Pull the image from the local registry
-          docker pull localhost:5000/${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }}
+          docker pull localhost:5000/robinfk/hrms:v${{ github.event.inputs.version || '15' }}
           
           # Run a simple test
-          docker run --rm localhost:5000/${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }} bash -c "echo 'Testing image' && ls -la /home/frappe/frappe-bench/apps"
+          docker run --rm localhost:5000/robinfk/hrms:v${{ github.event.inputs.version || '15' }} bash -c "echo 'Testing image' && ls -la /home/frappe/frappe-bench/apps"
 
   push:
     name: Push
@@ -147,14 +147,14 @@ jobs:
       - name: Create and push multi-arch manifest
         run: |
           # Create manifest for version tag
-          docker buildx imagetools create -t ${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }} \
-            localhost:5000/${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }}
+          docker buildx imagetools create -t robinfk/hrms:v${{ github.event.inputs.version || '15' }} \
+            localhost:5000/robinfk/hrms:v${{ github.event.inputs.version || '15' }}
           
           # Create manifest for latest tag
-          docker buildx imagetools create -t ${REGISTRY_USER}/hrms:latest \
-            localhost:5000/${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }}
+          docker buildx imagetools create -t robinfk/hrms:latest \
+            localhost:5000/robinfk/hrms:v${{ github.event.inputs.version || '15' }}
       
       - name: Workflow summary
         run: |
-          echo "🟢 Successfully built and pushed ${REGISTRY_USER}/hrms:v${{ github.event.inputs.version || '15' }} (multi-arch)"
-          echo "🟢 Also tagged as ${REGISTRY_USER}/hrms:latest"
+          echo "🟢 Successfully built and pushed robinfk/hrms:v${{ github.event.inputs.version || '15' }} (multi-arch)"
+          echo "🟢 Also tagged as robinfk/hrms:latest"
