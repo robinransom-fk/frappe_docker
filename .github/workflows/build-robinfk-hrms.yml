@@ -92,11 +92,11 @@ jobs:
           APPS_JSON_B64=$(base64 -w0 apps.json)
           echo "APPS_JSON_B64=$APPS_JSON_B64" >> $GITHUB_ENV
           
-          # Patch Containerfile to avoid interactive prompts
+          # Modify Containerfile to use 'yes' command to handle interactive prompts
           if [ -f "images/custom/Containerfile" ]; then
-            # Add --yes flag to bench init
-            sed -i 's/bench init \${APP_INSTALL_ARGS}/bench init --yes \${APP_INSTALL_ARGS}/g' images/custom/Containerfile
-            echo "Modified Containerfile to avoid interactive prompts"
+            # Replace the bench init command line with one that uses 'yes' to pipe "y" to all prompts
+            sed -i 's/bench init \${APP_INSTALL_ARGS}/yes | bench init \${APP_INSTALL_ARGS}/g' images/custom/Containerfile
+            echo "Modified Containerfile to auto-respond to interactive prompts"
           else
             echo "Error: images/custom/Containerfile not found"
             find . -name "Containerfile" | sort
