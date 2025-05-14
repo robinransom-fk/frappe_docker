@@ -28,6 +28,37 @@ on:
       DOCKERHUB_TOKEN:
         required: true
 
+  workflow_dispatch:
+    inputs:
+      repo:
+        required: true
+        type: choice
+        description: "Repository to build"
+        options:
+          - erpnext
+          - frappe
+      version:
+        required: true
+        type: string
+        description: "Major version, git tags should match 'v{version}.*'; or 'develop'"
+        default: "develop"
+      push:
+        required: true
+        type: boolean
+        description: "Push to DockerHub"
+        default: false
+      python_version:
+        required: true
+        type: string
+        description: "Python Version"
+        default: "3.10"
+      node_version:
+        required: true
+        type: string
+        description: "NodeJS Version"
+        default: "18"
+
+
 jobs:
   build:
     name: Build
