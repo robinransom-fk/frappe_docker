@@ -91,11 +91,14 @@ jobs:
           if [ -f "images/custom/Containerfile" ]; then
             sed -i 's/bench init \${APP_INSTALL_ARGS}/bench init --yes \${APP_INSTALL_ARGS}/g' images/custom/Containerfile
             echo "Modified Containerfile to avoid interactive prompts"
+          else
+            echo "Warning: images/custom/Containerfile not found"
+            find . -name "Containerfile" | sort
           fi
       
       - name: Create custom HRMS bake target
         run: |
-          # Create a custom bake file for HRMS
+          # Create a simple bake file for HRMS
           cat > hrms-bake.hcl <<EOF
           target "hrms" {
             context = "."
