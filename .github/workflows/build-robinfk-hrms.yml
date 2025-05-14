@@ -1,0 +1,193 @@
+name: Build HRMS Image
+
+on:
+  schedule:
+    - cron: '45 20 * * *'      # 02:15 IST daily
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 15)'
+        required: false
+        default: '15'
+      force_rebuild:
+        description: 'Force rebuild even if no changes'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  FRAPPE_VERSION: version-${{ github.event.inputs.version || '15' }}
+  ERPNEXT_VERSION: version-${{ github.event.inputs.version || '15' }}
+  HRMS_VERSION: version-${{ github.event.inputs.version || '15' }}
+  PYTHON_VERSION: 3.10.12
+  NODE_VERSION: 18.12.0
+
+jobs:
+  build:
+    name: Build HRMS
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: docker.io/registry:2
+        ports:
+          - 5000:5000
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          image: tonistiigi/binfmt:latest
+          platforms: all
+      
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+      
+      - name: Prepare Docker Bake files
+        run: |
+          # Create the docker-bake.hcl file
+          cat > docker-bake.hcl <<'EOF'
+          # Docker Buildx Bake build definition file for HRMS
+          variable "REGISTRY_USER" {
+              default = "robinfk"
+          }
+
+          variable "PYTHON_VERSION" {
+              default = "3.10.12"
+          }
+
+          variable "NODE_VERSION" {
+              default = "18.12.0"
+          }
+
+          variable "FRAPPE_VERSION" {
+              default = "version-15"
+          }
+
+          variable "ERPNEXT_VERSION" {
+              default = "version-15"
+          }
+
+          variable "HRMS_VERSION" {
+              default = "version-15"
+          }
+
+          variable "FRAPPE_REPO" {
+              default = "https://github.com/frappe/frappe"
+          }
+
+          variable "ERPNEXT_REPO" {
+              default = "https://github.com/frappe/erpnext"
+          }
+
+          variable "HRMS_REPO" {
+              default = "https://github.com/frappe/hrms"
+          }
+
+          variable "BENCH_REPO" {
+              default = "https://github.com/frappe/bench"
+          }
+
+          # Main target groups
+          group "default" {
+              targets = ["hrms"]
+          }
+
+          # Function to generate appropriate tags
+          function "tag" {
+              params = [repo, version]
+              result = [
+                # Push standard version tag
+                "${REGISTRY_USER}/${repo}:v${version}",
+                # Also use 'latest' tag
+                "${REGISTRY_USER}/${repo}:latest",
+              ]
+          }
+
+          # Default arguments for all targets
+          target "default-args" {
+              args = {
+                  FRAPPE_PATH = "${FRAPPE_REPO}"
+                  ERPNEXT_PATH = "${ERPNEXT_REPO}"
+                  HRMS_PATH = "${HRMS_REPO}"
+                  BENCH_REPO = "${BENCH_REPO}"
+                  FRAPPE_BRANCH = "${FRAPPE_VERSION}"
+                  ERPNEXT_BRANCH = "${ERPNEXT_VERSION}"
+                  HRMS_BRANCH = "${HRMS_VERSION}"
+                  PYTHON_VERSION = "${PYTHON_VERSION}"
+                  NODE_VERSION = "${NODE_VERSION}"
+                  APPS_JSON_BASE64 = ""
+              }
+          }
+
+          # HRMS target - the main one we want to build
+          target "hrms" {
+              inherits = ["default-args"]
+              context = "."
+              dockerfile = "images/custom/Containerfile"
+              tags = tag("hrms", "${HRMS_VERSION}" != "develop" ? substr("${HRMS_VERSION}", 8, 999) : "develop")
+          }
+          EOF
+          
+          # Create directories
+          mkdir -p images/custom
+          
+          # If apps.json exists, encode it
+          if [ -f "apps.json" ]; then
+            APPS_JSON_B64=$(base64 -w0 apps.json)
+            # Update the APPS_JSON_BASE64 variable in docker-bake.hcl
+            sed -i "s/APPS_JSON_BASE64 = \"\"/APPS_JSON_BASE64 = \"$APPS_JSON_B64\"/g" docker-bake.hcl
+          fi
+          
+          # Get Containerfile from frappe_docker
+          curl -s -o images/custom/Containerfile https://raw.githubusercontent.com/frappe/frappe_docker/main/images/custom/Containerfile
+          
+          # Modify Containerfile to avoid interactive prompts
+          sed -i 's/bench init \${APP_INSTALL_ARGS}/bench init --yes \${APP_INSTALL_ARGS}/g' images/custom/Containerfile
+          
+          # Create resources folder
+          mkdir -p resources
+          curl -s -o resources/nginx-entrypoint.sh https://raw.githubusercontent.com/frappe/frappe_docker/main/resources/nginx-entrypoint.sh
+          chmod +x resources/nginx-entrypoint.sh
+      
+      - name: Build locally
+        uses: docker/bake-action@v6.6.0
+        with:
+          load: true
+          files: docker-bake.hcl
+          set: |
+            *.args.FRAPPE_VERSION=${{ env.FRAPPE_VERSION }}
+            *.args.ERPNEXT_VERSION=${{ env.ERPNEXT_VERSION }}
+            *.args.HRMS_VERSION=${{ env.HRMS_VERSION }}
+            *.args.PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            *.args.NODE_VERSION=${{ env.NODE_VERSION }}
+        env:
+          REGISTRY_USER: localhost:5000/robinfk
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Push to Docker Hub
+        uses: docker/bake-action@v6.6.0
+        with:
+          push: true
+          files: docker-bake.hcl
+          set: |
+            *.args.FRAPPE_VERSION=${{ env.FRAPPE_VERSION }}
+            *.args.ERPNEXT_VERSION=${{ env.ERPNEXT_VERSION }}
+            *.args.HRMS_VERSION=${{ env.HRMS_VERSION }}
+            *.args.PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            *.args.NODE_VERSION=${{ env.NODE_VERSION }}
+            *.platform=linux/amd64,linux/arm64
+      
+      - name: Workflow summary
+        run: |
+          echo "🟢 Successfully built and pushed robinfk/hrms:v${{ github.event.inputs.version || '15' }}"
+          echo "🟢 Also tagged as robinfk/hrms:latest"
